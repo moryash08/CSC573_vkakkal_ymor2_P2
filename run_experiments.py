@@ -25,11 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-
-try:
-    import matplotlib.pyplot as plt
-except Exception:  # pragma: no cover - matplotlib might be missing
-    plt = None
+import matplotlib.pyplot as plt
 
 
 @dataclass
