@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Automation harness for Go-back-N experiments.
 
-Runs the Simple FTP client/server for the three required experiments:
+Runs the Simple FTP client against a pre-running server for the three required experiments:
 - Window size sweep (fixed MSS=500, p=0.05)
 - MSS sweep (fixed N=64, p=0.05)
 - Loss probability sweep (fixed N=64, MSS=500)
 
 The script:
-- Starts a fresh server for every trial.
+- Assumes the Simple FTP server is already running at the provided host/port.
 - Measures RTT via traceroute (or ping fallback) once per run.
 - Captures client transfer stats (bytes, segments, delay).
 - Writes raw and averaged CSVs plus PNG plots.
@@ -21,7 +21,6 @@ import re
 import statistics
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -80,38 +79,6 @@ def measure_rtt(host: str) -> Optional[float]:
     return None
 
 
-def start_server(
-    python_executable: str,
-    port: int,
-    output_path: Path,
-    loss_probability: float,
-    log_path: Path,
-) -> Tuple[subprocess.Popen, object]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_file = open(log_path, "w", encoding="utf-8")
-    cmd = [
-        python_executable,
-        "simple_ftp_server.py",
-        str(port),
-        str(output_path),
-        str(loss_probability),
-    ]
-    proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
-    time.sleep(0.2)
-    return proc, log_file
-
-
-def stop_server(proc: subprocess.Popen, log_file: object) -> None:
-    proc.terminate()
-    try:
-        proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=3)
-    log_file.close()
-
-
 def run_client(
     python_executable: str,
     host: str,
@@ -160,40 +127,24 @@ def run_trial(
     file_path: Path,
     window_size: int,
     mss: int,
-    loss_probability: float,
     timeout_s: float,
     run_index: int,
     experiment: str,
     parameter_name: str,
     parameter_value: float,
-    scratch_dir: Path,
     logs_dir: Path,
 ) -> TrialResult:
-    recv_path = scratch_dir / f"recv_{experiment}{parameter_value}{run_index}.txt"
-    server_log = logs_dir / f"server_{experiment}{parameter_value}{run_index}.log"
     client_log = logs_dir / f"client_{experiment}{parameter_value}{run_index}.log"
-
-    server_proc, server_log_handle = start_server(
+    bytes_sent, segments_sent, duration_s = run_client(
         python_executable=python_executable,
+        host=host,
         port=port,
-        output_path=recv_path,
-        loss_probability=loss_probability,
-        log_path=server_log,
+        file_path=file_path,
+        window_size=window_size,
+        mss=mss,
+        timeout_s=timeout_s,
+        log_path=client_log,
     )
-
-    try:
-        bytes_sent, segments_sent, duration_s = run_client(
-            python_executable=python_executable,
-            host=host,
-            port=port,
-            file_path=file_path,
-            window_size=window_size,
-            mss=mss,
-            timeout_s=timeout_s,
-            log_path=client_log,
-        )
-    finally:
-        stop_server(server_proc, server_log_handle)
 
     rtt_ms = measure_rtt(host)
 
@@ -289,7 +240,6 @@ def run_experiments(
     print(f"Using file '{file_path}' ({file_size} bytes)")
     print(f"Connecting to {host}:{port} with timeout={timeout_s}s")
 
-    scratch_dir = output_dir / "scratch"
     logs_dir = output_dir / "logs"
     results: List[TrialResult] = []
 
@@ -305,13 +255,11 @@ def run_experiments(
                     file_path=file_path,
                     window_size=window_size,
                     mss=500,
-                    loss_probability=0.05,
                     timeout_s=timeout_s,
                     run_index=run_index,
                     experiment="window_sweep",
                     parameter_name="N",
                     parameter_value=window_size,
-                    scratch_dir=scratch_dir,
                     logs_dir=logs_dir,
                 )
             )
@@ -327,13 +275,11 @@ def run_experiments(
                     file_path=file_path,
                     window_size=64,
                     mss=mss,
-                    loss_probability=0.05,
                     timeout_s=timeout_s,
                     run_index=run_index,
                     experiment="mss_sweep",
                     parameter_name="MSS",
                     parameter_value=mss,
-                    scratch_dir=scratch_dir,
                     logs_dir=logs_dir,
                 )
             )
@@ -350,13 +296,11 @@ def run_experiments(
                     file_path=file_path,
                     window_size=64,
                     mss=500,
-                    loss_probability=loss_probability,
                     timeout_s=timeout_s,
                     run_index=run_index,
                     experiment="loss_sweep",
                     parameter_name="p",
                     parameter_value=loss_probability,
-                    scratch_dir=scratch_dir,
                     logs_dir=logs_dir,
                 )
             )
