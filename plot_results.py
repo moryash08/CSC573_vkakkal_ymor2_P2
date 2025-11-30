@@ -8,14 +8,7 @@ import csv
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
-
-try:
-    import matplotlib.pyplot as plt
-except ImportError as exc:  # pragma: no cover - guard for missing dependency.
-    plt = None
-    IMPORT_ERROR = exc
-else:
-    IMPORT_ERROR = None
+import matplotlib.pyplot as plt
 
 
 def load_averages(csv_path: Path) -> List[Dict[str, float]]:
@@ -92,10 +85,6 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 
 
 def main(argv: List[str]) -> None:
-    if plt is None:
-        raise RuntimeError(
-            "matplotlib is required to render plots"
-        ) from IMPORT_ERROR
 
     args = parse_args(argv)
     csv_path = Path(args.averages_csv)
