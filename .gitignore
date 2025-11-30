@@ -1,0 +1,21 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+
+# Experiment outputs and logs
+output/
+output_test/
+scratch_sessions/
+*.log
+
+# Editor/OS clutter
+.DS_Store
+*.swp
+*.swo
+Thumbs.db
