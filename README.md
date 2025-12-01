@@ -157,3 +157,47 @@ python plot_results.py --averages-csv output/averages.csv --output-dir output
 ```
 
 to regenerate the Task 1–3 PNGs without rerunning the transfers.
+
+## Selective Repeat implementation
+
+The repository also includes a Selective Repeat variant of the Simple-FTP protocol.
+Run the SR server on the VCL host (note the additional window-size argument):
+
+```
+python sr_ftp_server.py 7735 received_sr.txt 64 0.05 --scratch-dir scratch_sessions_sr
+```
+
+Then send data from your laptop with the SR client:
+
+```
+python sr_ftp_client.py 152.7.176.134 7735 test_file.txt 64 500 --timeout 0.2 --ack-buffer-bytes 65536
+```
+
+Both programs share the same packet formats as the Go-Back-N version, but the sender
+maintains a per-packet timer and the receiver buffers out-of-order segments so that
+you can repeat Tasks 1–3 using the Selective Repeat ARQ scheme. The SR client now
+sends a control packet at startup so the server's window matches the sender when
+possible; the optional `--ack-buffer-bytes` flag constrains the effective window to
+`floor(buffer / MSS)` to emulate limited ACK storage. While the SR server is running
+it listens for control packets that update either the loss probability or the receive
+window size, allowing the automation harness to match the sender for Task 1 and
+constrain the window according to the ACK buffer during the other tasks.
+
+To automate the SR experiments use:
+
+```
+python sr_run_experiments.py --host 152.7.176.134 --port 7735 --file test_file.txt --output-dir sr_output
+```
+
+The script mirrors the Go-back-N automation but also adjusts the receiver window
+via control packets. For Task 1 it matches the sender’s window exactly; for Tasks 2
+and 3 it computes the receive window as
+
+```
+min(sender_window, max(1, ack_buffer_bytes // MSS))
+```
+
+where `ack_buffer_bytes` (default 65536) models how many ACKs the receiver can keep
+in flight. You can override this with `--ack-buffer-bytes` to reflect your server’s
+capabilities. The script records `sr_raw_trials.csv`, `sr_averages.csv`, and SR
+versions of the plots inside the selected output directory.

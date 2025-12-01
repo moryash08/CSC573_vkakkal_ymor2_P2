@@ -42,11 +42,6 @@ def build_ack_packet(sequence: int) -> bytes:
     return HEADER_STRUCT.pack(sequence, 0, ACK_PACKET_TYPE)
 
 
-def build_control_packet(loss_probability: float) -> bytes:
-    payload = f"{loss_probability:.4f}".encode("ascii")
-    return HEADER_STRUCT.pack(0, 0, CONTROL_PACKET_TYPE) + payload
-
-
 def parse_data_packet(packet: bytes) -> Optional[Tuple[int, int, int, bytes]]:
     if len(packet) < HEADER_SIZE:
         return None
@@ -62,3 +57,25 @@ def parse_ack_packet(packet: bytes) -> Optional[int]:
     if packet_type != ACK_PACKET_TYPE or checksum != 0:
         return None
     return sequence
+
+
+def build_control_packet(command: str, value: float) -> bytes:
+    payload = f"{command.upper()}:{value:.6f}".encode("ascii")
+    return HEADER_STRUCT.pack(0, 0, CONTROL_PACKET_TYPE) + payload
+
+
+def parse_control_payload(payload: bytes) -> Optional[Tuple[str, float]]:
+    try:
+        text = payload.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    if ":" in text:
+        command, value = text.split(":", 1)
+    elif "=" in text:
+        command, value = text.split("=", 1)
+    else:
+        command, value = "LOSS", text
+    try:
+        return command.upper(), float(value)
+    except ValueError:
+        return None

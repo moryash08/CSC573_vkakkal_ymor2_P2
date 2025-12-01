@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simple-FTP server that implements the Go-back-N receiver."""
+"""Selective Repeat Simple-FTP server."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import socket
 import sys
 import time
 from pathlib import Path
-from typing import IO, Optional, Tuple
+from typing import Dict, IO, List, Optional, Tuple
 
 from simple_ftp_common import (
     CONTROL_PACKET_TYPE,
@@ -24,11 +24,14 @@ from simple_ftp_common import (
 def run_server(
     port: int,
     output_path: Path,
+    window_size: int,
     loss_probability: float,
     scratch_dir: Optional[Path] = None,
 ) -> None:
     if not (0.0 <= loss_probability < 1.0):
         raise ValueError("loss probability p must be in [0, 1)")
+    if window_size <= 0:
+        raise ValueError("Window size must be positive")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", port))
@@ -36,15 +39,13 @@ def run_server(
     if scratch_dir:
         scratch_dir.mkdir(parents=True, exist_ok=True)
 
-    expected_sequence = 0
+    expected_base = 0
+    buffer: Dict[int, bytes] = {}
     current_client: Optional[Tuple[str, int]] = None
-    last_packet_time = 0.0
     current_file: Optional[IO[bytes]] = None
-    current_path: Optional[Path] = None
     session_counter = 0
-
-    print(f"Listening on UDP port {port}")
-    print(f"Packet loss probability = {loss_probability}")
+    receiver_window = window_size
+    last_packet_time = 0.0
 
     def close_file() -> None:
         nonlocal current_file
@@ -53,30 +54,43 @@ def run_server(
             current_file = None
 
     def open_session_file(client_address: Tuple[str, int]) -> None:
-        nonlocal expected_sequence, current_client, current_file, current_path, session_counter
+        nonlocal current_client, expected_base, buffer, current_file, session_counter, last_packet_time
         close_file()
+        buffer = {}
+        expected_base = 0
         session_counter += 1
         if scratch_dir:
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            current_path = scratch_dir / f"session_{session_counter}_{timestamp}.bin"
+            session_path = scratch_dir / f"session_sr_{session_counter}_{timestamp}.bin"
         else:
-            current_path = output_path
             output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        current_file = current_path.open("wb")
-        expected_sequence = 0
+            session_path = output_path
+        current_file = session_path.open("wb")
         current_client = client_address
-        print(f"New transfer from {client_address}, writing to '{current_path}'")
+        last_packet_time = time.monotonic()
+        print(f"New SR transfer from {client_address}, writing to '{session_path}'")
+        return
+
+    def deliver_in_order(file_handle: IO[bytes]) -> None:
+        nonlocal expected_base, buffer
+        while expected_base in buffer:
+            file_handle.write(buffer.pop(expected_base))
+            file_handle.flush()
+            expected_base += 1
 
     try:
+        print(f"Selective Repeat server listening on UDP port {port}")
+        print(f"Initial loss probability = {loss_probability}, window size = {receiver_window}")
+
         while True:
             data, client_address = sock.recvfrom(65535)
-
             parsed = parse_data_packet(data)
             if not parsed:
                 continue
 
             sequence, checksum, packet_type, payload = parsed
+
+            now = time.monotonic()
 
             if packet_type == CONTROL_PACKET_TYPE:
                 parsed_control = parse_control_payload(payload)
@@ -90,25 +104,31 @@ def run_server(
                         continue
                     loss_probability = value
                     print(f"Updated loss probability to {loss_probability}")
+                elif command == "WINDOW":
+                    new_window = int(max(1, value))
+                    receiver_window = new_window
+                    print(f"Updated receiver window size to {receiver_window}")
                 else:
                     print(f"Ignoring unsupported control command '{command}'")
                 continue
 
-            now = time.monotonic()
+            if packet_type != DATA_PACKET_TYPE:
+                continue
 
             if current_client is None or client_address != current_client:
                 open_session_file(client_address)
             elif (
                 sequence == 0
-                and expected_sequence != 0
+                and expected_base != 0
                 and now - last_packet_time > 1.0
             ):
-                # Same sender restarted a new transfer after some idle time.
+                # New transfer from same sender after idle period.
                 open_session_file(client_address)
 
-            last_packet_time = now
-            if packet_type != DATA_PACKET_TYPE or current_file is None:
+            if current_file is None:
                 continue
+
+            last_packet_time = now
 
             if random.random() <= loss_probability:
                 print(f"Packet loss, sequence number = {sequence}")
@@ -116,38 +136,37 @@ def run_server(
 
             computed_checksum = calculate_checksum(payload)
             if computed_checksum != checksum:
-                # Corrupted packet -> ACK last in-order sequence.
-                if expected_sequence > 0:
-                    ack_packet = build_ack_packet(expected_sequence - 1)
-                    sock.sendto(ack_packet, client_address)
                 continue
 
-            if sequence == expected_sequence:
-                current_file.write(payload)
-                current_file.flush()
-                ack_packet = build_ack_packet(sequence)
-                sock.sendto(ack_packet, client_address)
-                expected_sequence += 1
-            elif sequence < expected_sequence:
-                # Duplicate segment due to timeout at sender.
-                ack_packet = build_ack_packet(sequence)
-                sock.sendto(ack_packet, client_address)
-            else:
-                # Future segment -> ACK last correctly received packet.
-                if expected_sequence > 0:
-                    ack_packet = build_ack_packet(expected_sequence - 1)
-                    sock.sendto(ack_packet, client_address)
+            if sequence < expected_base:
+                # Already delivered; re-ACK to help the sender.
+                sock.sendto(build_ack_packet(sequence), client_address)
+                continue
+
+            if sequence >= expected_base + receiver_window:
+                # Outside the receive window; ignore but ACK last valid sequence.
+                if expected_base > 0:
+                    sock.sendto(build_ack_packet(expected_base - 1), client_address)
+                continue
+
+            if sequence not in buffer:
+                buffer[sequence] = payload
+
+            sock.sendto(build_ack_packet(sequence), client_address)
+            deliver_in_order(current_file)
+
     except KeyboardInterrupt:
-        print("\nShutting down server ...", file=sys.stderr)
+        print("\nShutting down Selective Repeat server ...", file=sys.stderr)
     finally:
         close_file()
         sock.close()
 
 
-def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple-FTP Go-back-N server")
+def parse_args(argv: List[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Selective Repeat Simple-FTP server")
     parser.add_argument("port", type=int, help="UDP port to listen on (7735)")
     parser.add_argument("file_name", help="File that will store the received data")
+    parser.add_argument("window_size", type=int, help="Selective Repeat window size N")
     parser.add_argument(
         "p",
         type=float,
@@ -155,13 +174,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scratch-dir",
-        help="Directory where each new transfer is saved as session_<n>.bin "
+        help="Directory where each new transfer is saved as session_sr_<n>.bin "
         "(default: overwrite the provided file name)",
     )
     return parser.parse_args(argv)
 
 
-def main(argv: list[str]) -> None:
+def main(argv: List[str]) -> None:
     args = parse_args(argv)
     output_path = Path(args.file_name).expanduser().resolve()
     if output_path.parent and not output_path.parent.exists():
@@ -172,6 +191,7 @@ def main(argv: list[str]) -> None:
     run_server(
         port=args.port,
         output_path=output_path,
+        window_size=args.window_size,
         loss_probability=args.p,
         scratch_dir=scratch_dir,
     )

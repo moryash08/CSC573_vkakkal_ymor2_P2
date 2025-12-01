@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""Automation harness for Go-back-N experiments.
-
-Runs the Simple FTP client against a pre-running server for the three required experiments:
-- Window size sweep (fixed MSS=500, p=0.05)
-- MSS sweep (fixed N=64, p=0.05)
-- Loss probability sweep (fixed N=64, MSS=500)
-
-The script:
-- Assumes the Simple FTP server is already running at the provided host/port.
-- Measures RTT via traceroute (or ping fallback) once per run.
-- Captures client transfer stats (bytes, segments, delay).
-- Writes raw and averaged CSVs plus PNG plots.
-"""
+"""Automation harness for Selective Repeat experiments."""
 
 from __future__ import annotations
 
@@ -26,6 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+
 import matplotlib.pyplot as plt
 from simple_ftp_common import build_control_packet
 
@@ -83,7 +72,7 @@ def measure_rtt(host: str) -> Optional[float]:
 
 
 def configure_server_loss_probability(host: str, port: int, loss_probability: float) -> None:
-    """Send a control packet to the server to update its packet-loss probability."""
+    """Send a control packet to the SR server to update its packet-loss probability."""
 
     packet = build_control_packet("LOSS", loss_probability)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -91,7 +80,18 @@ def configure_server_loss_probability(host: str, port: int, loss_probability: fl
         sock.sendto(packet, (host, port))
     finally:
         sock.close()
-    # Allow the server a brief moment to apply the setting before the trial begins.
+    time.sleep(0.05)
+
+
+def configure_server_window(host: str, port: int, window_size: int) -> None:
+    """Send a control packet to adjust the receiver's window size."""
+
+    packet = build_control_packet("WINDOW", float(window_size))
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(packet, (host, port))
+    finally:
+        sock.close()
     time.sleep(0.05)
 
 
@@ -107,7 +107,7 @@ def run_client(
 ) -> Tuple[int, int, float]:
     cmd = [
         python_executable,
-        "simple_ftp_client.py",
+        "sr_ftp_client.py",
         host,
         str(port),
         str(file_path),
@@ -126,7 +126,7 @@ def run_client(
     )
     if match is None:
         raise RuntimeError(
-            f"Client run failed (window={window_size}, mss={mss}): {result.stdout}\n{result.stderr}"
+            f"SR client run failed (window={window_size}, mss={mss}): {result.stdout}\n{result.stderr}"
         )
 
     bytes_sent = int(match.group(1))
@@ -143,16 +143,18 @@ def run_trial(
     file_path: Path,
     window_size: int,
     mss: int,
-    timeout_s: float,
     loss_probability: float,
+    receiver_window: int,
+    timeout_s: float,
     run_index: int,
     experiment: str,
     parameter_name: str,
     parameter_value: float,
     logs_dir: Path,
 ) -> TrialResult:
-    client_log = logs_dir / f"client_{experiment}{parameter_value}{run_index}.log"
+    client_log = logs_dir / f"sr_client_{experiment}{parameter_value}{run_index}.log"
 
+    configure_server_window(host, port, receiver_window)
     configure_server_loss_probability(host, port, loss_probability)
 
     bytes_sent, segments_sent, duration_s = run_client(
@@ -169,7 +171,7 @@ def run_trial(
     rtt_ms = measure_rtt(host)
 
     print(
-        f"[{experiment}] run={run_index} {parameter_name}={parameter_value} "
+        f"[SR {experiment}] run={run_index} {parameter_name}={parameter_value} "
         f"bytes={bytes_sent} segments={segments_sent} duration={duration_s:.4f}s rtt_ms={rtt_ms}"
     )
 
@@ -246,6 +248,19 @@ def plot_series(
     plt.close()
 
 
+def compute_receiver_window(
+    *,
+    match_sender: bool,
+    sender_window: int,
+    mss: int,
+    ack_buffer_bytes: int,
+) -> int:
+    if match_sender:
+        return max(1, sender_window)
+    capacity = max(1, ack_buffer_bytes // max(1, mss))
+    return max(1, min(sender_window, capacity))
+
+
 def run_experiments(
     *,
     python_executable: str,
@@ -255,10 +270,11 @@ def run_experiments(
     runs: int,
     timeout_s: float,
     output_dir: Path,
+    ack_buffer_bytes: int,
 ) -> None:
     file_size = file_path.stat().st_size
-    print(f"Using file '{file_path}' ({file_size} bytes)")
-    print(f"Connecting to {host}:{port} with timeout={timeout_s}s")
+    print(f"[SR] Using file '{file_path}' ({file_size} bytes)")
+    print(f"[SR] Connecting to {host}:{port} with timeout={timeout_s}s")
 
     logs_dir = output_dir / "logs"
     results: List[TrialResult] = []
@@ -275,18 +291,25 @@ def run_experiments(
                     file_path=file_path,
                     window_size=window_size,
                     mss=500,
-                    timeout_s=timeout_s,
                     loss_probability=0.05,
+                    timeout_s=timeout_s,
                     run_index=run_index,
-                    experiment="window_sweep",
+                    experiment="sr_window_sweep",
                     parameter_name="N",
                     parameter_value=window_size,
+                    receiver_window=window_size,
                     logs_dir=logs_dir,
                 )
             )
 
     # Task 2: MSS sweep
     for mss in range(100, 1001, 100):
+        receiver_window = compute_receiver_window(
+            match_sender=False,
+            sender_window=64,
+            mss=mss,
+            ack_buffer_bytes=ack_buffer_bytes,
+        )
         for run_index in range(1, runs + 1):
             results.append(
                 run_trial(
@@ -296,12 +319,13 @@ def run_experiments(
                     file_path=file_path,
                     window_size=64,
                     mss=mss,
-                    timeout_s=timeout_s,
                     loss_probability=0.05,
+                    timeout_s=timeout_s,
                     run_index=run_index,
-                    experiment="mss_sweep",
+                    experiment="sr_mss_sweep",
                     parameter_name="MSS",
                     parameter_value=mss,
+                    receiver_window=receiver_window,
                     logs_dir=logs_dir,
                 )
             )
@@ -309,6 +333,12 @@ def run_experiments(
     # Task 3: loss probability sweep
     loss_values = [round(x / 100, 2) for x in range(1, 11)]
     for loss_probability in loss_values:
+        receiver_window = compute_receiver_window(
+            match_sender=False,
+            sender_window=64,
+            mss=500,
+            ack_buffer_bytes=ack_buffer_bytes,
+        )
         for run_index in range(1, runs + 1):
             results.append(
                 run_trial(
@@ -318,65 +348,87 @@ def run_experiments(
                     file_path=file_path,
                     window_size=64,
                     mss=500,
-                    timeout_s=timeout_s,
                     loss_probability=loss_probability,
+                    timeout_s=timeout_s,
                     run_index=run_index,
-                    experiment="loss_sweep",
+                    experiment="sr_loss_sweep",
                     parameter_name="p",
                     parameter_value=loss_probability,
+                    receiver_window=receiver_window,
                     logs_dir=logs_dir,
                 )
             )
 
-    raw_csv = output_dir / "raw_trials.csv"
+    raw_csv = output_dir / "sr_raw_trials.csv"
     write_csv(
         raw_csv,
-        ["experiment", "parameter", "value", "run_index", "duration_s", "bytes_sent", "segments_sent", "rtt_ms"],
+        [
+            "experiment",
+            "parameter",
+            "value",
+            "run_index",
+            "duration_s",
+            "bytes_sent",
+            "segments_sent",
+            "rtt_ms",
+        ],
         (trial.as_row() for trial in results),
     )
 
     averages = average_trials(results)
-    avg_csv = output_dir / "averages.csv"
+    avg_csv = output_dir / "sr_averages.csv"
     write_csv(
         avg_csv,
-        ["experiment", "parameter", "value", "avg_duration_s", "min_duration_s", "max_duration_s", "avg_rtt_ms", "runs"],
+        [
+            "experiment",
+            "parameter",
+            "value",
+            "avg_duration_s",
+            "min_duration_s",
+            "max_duration_s",
+            "avg_rtt_ms",
+            "runs",
+        ],
         averages,
     )
 
-    print(f"Wrote raw trial data to {raw_csv}")
-    print(f"Wrote averaged results to {avg_csv}")
+    print(f"Wrote SR raw trial data to {raw_csv}")
+    print(f"Wrote SR averaged results to {avg_csv}")
 
-    # Build plots
     avg_map: Dict[Tuple[str, float], float] = {
         (row["experiment"], float(row["value"])): float(row["avg_duration_s"])
         for row in averages
         if row.get("avg_duration_s") is not None
     }
     plot_series(
-        output_path=output_dir / "plot_window_vs_delay.png",
-        title="Average Delay vs Window Size",
+        output_path=output_dir / "sr_plot_window_vs_delay.png",
+        title="SR Average Delay vs Window Size",
         xlabel="Window size N",
         ylabel="Average delay (s)",
-        points=[(n, avg_map[("window_sweep", float(n))]) for n in window_values],
+        points=[(n, avg_map[("sr_window_sweep", float(n))]) for n in window_values],
     )
     plot_series(
-        output_path=output_dir / "plot_mss_vs_delay.png",
-        title="Average Delay vs MSS",
+        output_path=output_dir / "sr_plot_mss_vs_delay.png",
+        title="SR Average Delay vs MSS",
         xlabel="MSS (bytes)",
         ylabel="Average delay (s)",
-        points=[(mss, avg_map[("mss_sweep", float(mss))]) for mss in range(100, 1001, 100)],
+        points=[
+            (mss, avg_map[("sr_mss_sweep", float(mss))]) for mss in range(100, 1001, 100)
+        ],
     )
     plot_series(
-        output_path=output_dir / "plot_loss_vs_delay.png",
-        title="Average Delay vs Loss Probability",
+        output_path=output_dir / "sr_plot_loss_vs_delay.png",
+        title="SR Average Delay vs Loss Probability",
         xlabel="Loss probability p",
         ylabel="Average delay (s)",
-        points=[(p, avg_map[("loss_sweep", float(p))]) for p in loss_values],
+        points=[(p, avg_map[("sr_loss_sweep", float(p))]) for p in loss_values],
     )
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Go-back-N experiments automatically")
+    parser = argparse.ArgumentParser(
+        description="Run Selective Repeat experiments automatically"
+    )
     parser.add_argument(
         "--host",
         default="127.0.0.1",
@@ -407,8 +459,15 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="experiment_results",
-        help="Directory for CSVs, plots, and logs (default: experiment_results)",
+        default="sr_experiment_results",
+        help="Directory for CSVs, plots, and logs (default: sr_experiment_results)",
+    )
+    parser.add_argument(
+        "--ack-buffer-bytes",
+        type=int,
+        default=65536,
+        help="Approximate receiver ACK buffer size in bytes for computing the SR window "
+        "during MSS/loss sweeps (default: 65536)",
     )
     parser.add_argument(
         "--python",
@@ -435,7 +494,9 @@ def main(argv: List[str]) -> None:
         runs=args.runs,
         timeout_s=args.timeout,
         output_dir=output_dir,
+        ack_buffer_bytes=args.ack_buffer_bytes,
     )
+
 
 if __name__ == "__main__":
     try:
