@@ -18,13 +18,16 @@ from __future__ import annotations
 import argparse
 import csv
 import re
+import socket
 import statistics
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
+from simple_ftp_common import build_control_packet
 
 
 @dataclass
@@ -79,6 +82,19 @@ def measure_rtt(host: str) -> Optional[float]:
     return None
 
 
+def configure_server_loss_probability(host: str, port: int, loss_probability: float) -> None:
+    """Send a control packet to the server to update its packet-loss probability."""
+
+    packet = build_control_packet(loss_probability)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(packet, (host, port))
+    finally:
+        sock.close()
+    # Allow the server a brief moment to apply the setting before the trial begins.
+    time.sleep(0.05)
+
+
 def run_client(
     python_executable: str,
     host: str,
@@ -128,6 +144,7 @@ def run_trial(
     window_size: int,
     mss: int,
     timeout_s: float,
+    loss_probability: float,
     run_index: int,
     experiment: str,
     parameter_name: str,
@@ -135,6 +152,9 @@ def run_trial(
     logs_dir: Path,
 ) -> TrialResult:
     client_log = logs_dir / f"client_{experiment}{parameter_value}{run_index}.log"
+
+    configure_server_loss_probability(host, port, loss_probability)
+
     bytes_sent, segments_sent, duration_s = run_client(
         python_executable=python_executable,
         host=host,
@@ -256,6 +276,7 @@ def run_experiments(
                     window_size=window_size,
                     mss=500,
                     timeout_s=timeout_s,
+                    loss_probability=0.05,
                     run_index=run_index,
                     experiment="window_sweep",
                     parameter_name="N",
@@ -276,6 +297,7 @@ def run_experiments(
                     window_size=64,
                     mss=mss,
                     timeout_s=timeout_s,
+                    loss_probability=0.05,
                     run_index=run_index,
                     experiment="mss_sweep",
                     parameter_name="MSS",
@@ -297,6 +319,7 @@ def run_experiments(
                     window_size=64,
                     mss=500,
                     timeout_s=timeout_s,
+                    loss_probability=loss_probability,
                     run_index=run_index,
                     experiment="loss_sweep",
                     parameter_name="p",

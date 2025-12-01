@@ -78,6 +78,7 @@ Arguments:
 Optional flag:
 
 * `--scratch-dir <path>` saves each new transfer as `session_<n>.bin` under the given directory instead of overwriting the same file.
+* While the server is running you can update the drop probability dynamically by sending a control packet (the automation script handles this automatically).
 
 Press `Ctrl+C` to stop the server after a transfer.  The server acknowledges
 duplicate packets and retransmits the last in-order ACK when needed to match
@@ -144,9 +145,10 @@ Then kick off the automation from your laptop (adjust host/file paths as needed)
 python run_experiments.py --host 152.7.176.134 --port 7735 --file test_file.txt --output-dir output
 ```
 
-The script executes the trials for each task, captures the client timings, and
-writes `output/raw_trials.csv` plus `output/averages.csv`; plots are emitted into
-the same `output` folder. 
+Before each trial the script sends a control packet to the server to set the desired
+loss probability, so Task 3 can sweep `p` values without restarting the server. It
+captures the client timings, and writes `output/raw_trials.csv` plus
+`output/averages.csv`; plots are emitted into the same `output` folder.
 
 If you already have CSVs and only need the charts, run:
 

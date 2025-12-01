@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import IO, Optional, Tuple
 
 from simple_ftp_common import (
+    CONTROL_PACKET_TYPE,
     DATA_PACKET_TYPE,
     build_ack_packet,
     calculate_checksum,
@@ -75,6 +76,20 @@ def run_server(
                 continue
 
             sequence, checksum, packet_type, payload = parsed
+
+            if packet_type == CONTROL_PACKET_TYPE:
+                try:
+                    requested = float(payload.decode("ascii").strip())
+                except (ValueError, UnicodeDecodeError):
+                    print("Received invalid control payload, ignoring")
+                    continue
+                if not (0.0 <= requested < 1.0):
+                    print(f"Ignoring out-of-range loss probability request: {requested}")
+                    continue
+                loss_probability = requested
+                print(f"Updated loss probability to {loss_probability}")
+                continue
+
             now = time.monotonic()
 
             if current_client is None or client_address != current_client:

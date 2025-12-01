@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 
 DATA_PACKET_TYPE = 0x5555
 ACK_PACKET_TYPE = 0xAAAA
+CONTROL_PACKET_TYPE = 0xCCCC
 HEADER_STRUCT = struct.Struct("!IHH")
 HEADER_SIZE = HEADER_STRUCT.size
 
@@ -39,6 +40,11 @@ def build_data_packet(sequence: int, payload: bytes) -> bytes:
 
 def build_ack_packet(sequence: int) -> bytes:
     return HEADER_STRUCT.pack(sequence, 0, ACK_PACKET_TYPE)
+
+
+def build_control_packet(loss_probability: float) -> bytes:
+    payload = f"{loss_probability:.4f}".encode("ascii")
+    return HEADER_STRUCT.pack(0, 0, CONTROL_PACKET_TYPE) + payload
 
 
 def parse_data_packet(packet: bytes) -> Optional[Tuple[int, int, int, bytes]]:
